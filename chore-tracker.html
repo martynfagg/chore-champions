@@ -582,6 +582,12 @@ async function loadChores() {
               : c.doneBy ? c.doneBy.split(',').filter(Boolean)
               : []
       }));
+      if (data.scores) {
+        const s = getWeeklyScores();
+        s.Charlie = data.scores.Charlie || 0;
+        s.Bertie  = data.scores.Bertie  || 0;
+        saveWeeklyScores(s);
+      }
     } else {
       chores = DEFAULT_CHORES.map(c => ({ ...c, doneBy: [] }));
     }
@@ -711,6 +717,7 @@ async function toggleChore(id, event) {
   if (!chore) return;
 
   const alreadyDone = chore.doneBy.includes(selectedKid);
+  const delta = alreadyDone ? -1 : 1;
   const scores = getWeeklyScores();
   if (alreadyDone) {
     chore.doneBy = chore.doneBy.filter(k => k !== selectedKid);
@@ -724,8 +731,19 @@ async function toggleChore(id, event) {
 
   renderAll();
   syncingChores.add(id);
-  await saveChore(chore);
+  await Promise.all([saveChore(chore), saveScore(selectedKid, delta)]);
   syncingChores.delete(id);
+}
+
+async function saveScore(kid, delta) {
+  if (!SCRIPT_URL) return;
+  try {
+    const params = new URLSearchParams({ action: 'updateScore', kid, delta });
+    const res = await fetch(`${SCRIPT_URL}?${params}`);
+    if (!res.ok) throw new Error(`HTTP ${res.status}`);
+  } catch(e) {
+    console.warn('Score sync failed:', e.message);
+  }
 }
 
 async function saveChore(chore) {
