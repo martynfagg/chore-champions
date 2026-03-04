@@ -220,15 +220,19 @@
     font-size: 1rem;
     transition: all 0.2s;
   }
-  .done-charlie .chore-check {
+  .chore-check.checked-charlie {
     background: var(--charlie);
     border-color: var(--charlie);
     color: white;
   }
-  .done-bertie .chore-check {
+  .chore-check.checked-bertie {
     background: var(--bertie);
     border-color: var(--bertie);
     color: white;
+  }
+  .chore-item.done-both {
+    background: linear-gradient(135deg, var(--charlie-light) 50%, var(--bertie-light) 50%);
+    border-color: var(--gold);
   }
 
   /* Status banner */
@@ -391,10 +395,10 @@
   }
 
   .loading-overlay {
+    display: none;
     position: fixed;
     inset: 0;
     background: rgba(255,255,255,0.85);
-    display: flex;
     align-items: center;
     justify-content: center;
     z-index: 200;
@@ -402,6 +406,7 @@
     font-size: 1.2rem;
     color: var(--text);
   }
+  .loading-overlay.show { display: flex; }
   .spinner {
     width: 40px; height: 40px;
     border: 4px solid #E2E8F0;
@@ -438,19 +443,19 @@
   <div class="score-card charlie">
     <div class="kid-name">Charlie</div>
     <div class="score-num" id="charlieScore">0</div>
-    <div class="score-label">chores done</div>
+    <div class="score-label">this week</div>
   </div>
   <div class="score-card bertie">
     <div class="kid-name">Bertie</div>
     <div class="score-num" id="bertieScore">0</div>
-    <div class="score-label">chores done</div>
+    <div class="score-label">this week</div>
   </div>
 </div>
 
 <!-- View tabs -->
 <div class="view-tabs">
-  <button class="view-tab active" onclick="switchView('chores')">📋 Chores</button>
-  <button class="view-tab" onclick="switchView('summary')">📊 Summary</button>
+  <button class="view-tab active" data-view="chores" onclick="switchView('chores')">📋 Chores</button>
+  <button class="view-tab" data-view="summary" onclick="switchView('summary')">📊 Summary</button>
 </div>
 
 <!-- Status banner -->
@@ -480,7 +485,7 @@
 </div>
 
 <!-- Config button -->
-<button class="config-btn" onclick="toggleConfig()" title="Settings">⚙️</button>
+<button class="config-btn" id="configBtn" onclick="toggleConfig()" title="Settings">⚙️</button>
 
 <!-- Config panel -->
 <div class="config-panel" id="configPanel">
@@ -502,31 +507,65 @@ const DEFAULT_CHORES = [
   { id: 'dishes',    emoji: '🍽️',  name: 'Wash the dishes' },
   { id: 'hoover',    emoji: '🧹',  name: 'Hoover the floor' },
   { id: 'bins',      emoji: '🗑️',  name: 'Empty the bins' },
-  { id: 'laundry',   emoji: '👕',  name: 'Put laundry away' },
-  { id: 'table',     emoji: '🍴',  name: 'Set the table' },
-  { id: 'pets',      emoji: '🐾',  name: 'Feed the pets' },
+  { id: 'laundry',   emoji: '👕',  name: 'Put the washing on' },
+  { id: 'table',     emoji: '🍴',  name: 'Hang the washing out' },
+  { id: 'pets',      emoji: '🐾',  name: 'Walk the dog' },
   { id: 'tidy',      emoji: '🧸',  name: 'Tidy your bedroom' },
   { id: 'shopping',  emoji: '🛍️',  name: 'Help with shopping' },
   { id: 'recycling', emoji: '♻️',  name: 'Sort the recycling' },
-  { id: 'wipe',      emoji: '🧽',  name: 'Wipe the surfaces' },
+  { id: 'wipe',      emoji: '🧽',  name: 'Mow the lawn' },
 ];
+
+// ─── WEEKLY SCORES ────────────────────────────────────────────────────────────
+const WEEKLY_KEY = 'choreChampions_weeklyScores';
+
+function getWeekKey() {
+  const now = new Date();
+  const day = now.getDay(); // 0=Sun, 1=Mon...
+  const diff = day === 0 ? -6 : 1 - day; // offset to Monday
+  const monday = new Date(now);
+  monday.setDate(now.getDate() + diff);
+  return monday.toISOString().slice(0, 10); // YYYY-MM-DD
+}
+
+function getWeeklyScores() {
+  const week = getWeekKey();
+  try {
+    const stored = JSON.parse(localStorage.getItem(WEEKLY_KEY) || 'null');
+    if (stored && stored.week === week) return stored;
+  } catch(e) {}
+  return { week, Charlie: 0, Bertie: 0 };
+}
+
+function saveWeeklyScores(scores) {
+  localStorage.setItem(WEEKLY_KEY, JSON.stringify(scores));
+}
 
 // ─── STATE ────────────────────────────────────────────────────────────────────
 let selectedKid = 'Charlie';
 let chores = []; // will be loaded from sheet or defaults
 let currentView = 'chores';
+const syncingChores = new Set();
 
 // ─── INIT ─────────────────────────────────────────────────────────────────────
 window.addEventListener('DOMContentLoaded', () => {
   document.getElementById('scriptUrlInput').value = SCRIPT_URL;
   loadChores();
+  document.addEventListener('click', e => {
+    const panel = document.getElementById('configPanel');
+    if (panel.classList.contains('show') &&
+        !panel.contains(e.target) &&
+        e.target !== document.getElementById('configBtn')) {
+      panel.classList.remove('show');
+    }
+  });
 });
 
 async function loadChores() {
   showLoading(true);
   if (!SCRIPT_URL) {
     // No URL set - use defaults with no completion data
-    chores = DEFAULT_CHORES.map(c => ({ ...c, doneBy: null }));
+    chores = DEFAULT_CHORES.map(c => ({ ...c, doneBy: [] }));
     showLoading(false);
     renderAll();
     showBanner('⚙️ Set your Google Apps Script URL in settings to save progress!', 'info');
@@ -534,14 +573,20 @@ async function loadChores() {
   }
   try {
     const res = await fetch(`${SCRIPT_URL}?action=getChores`);
+    if (!res.ok) throw new Error(`HTTP ${res.status}`);
     const data = await res.json();
     if (data.chores) {
-      chores = data.chores;
+      chores = data.chores.map(c => ({
+        ...c,
+        doneBy: Array.isArray(c.doneBy) ? c.doneBy
+              : c.doneBy ? c.doneBy.split(',').filter(Boolean)
+              : []
+      }));
     } else {
-      chores = DEFAULT_CHORES.map(c => ({ ...c, doneBy: null }));
+      chores = DEFAULT_CHORES.map(c => ({ ...c, doneBy: [] }));
     }
   } catch(e) {
-    chores = DEFAULT_CHORES.map(c => ({ ...c, doneBy: null }));
+    chores = DEFAULT_CHORES.map(c => ({ ...c, doneBy: [] }));
     showBanner('⚠️ Could not reach Google Sheet. Working offline.', 'error');
   }
   showLoading(false);
@@ -561,41 +606,89 @@ function renderChores() {
   list.innerHTML = '';
   chores.forEach(chore => {
     const div = document.createElement('div');
-    div.className = 'chore-item' + (chore.doneBy ? ` done-${chore.doneBy.toLowerCase()}` : '');
-    div.onclick = () => toggleChore(chore.id);
-    div.innerHTML = `
-      <div class="chore-emoji">${chore.emoji}</div>
-      <div class="chore-info">
-        <div class="chore-name">${chore.name}</div>
-        ${chore.doneBy ? `<div class="chore-done-by ${chore.doneBy.toLowerCase()}">✓ Done by ${chore.doneBy}</div>` : ''}
-      </div>
-      <div class="chore-check">${chore.doneBy ? '✓' : ''}</div>
-    `;
+    const doneByCharlie = chore.doneBy.includes('Charlie');
+    const doneByBertie  = chore.doneBy.includes('Bertie');
+    const doneBoth      = doneByCharlie && doneByBertie;
+    let itemClass = 'chore-item';
+    if (doneBoth)          itemClass += ' done-both';
+    else if (doneByCharlie) itemClass += ' done-charlie';
+    else if (doneByBertie)  itemClass += ' done-bertie';
+    div.className = itemClass;
+    div.onclick = (e) => toggleChore(chore.id, e);
+
+    const emojiDiv = document.createElement('div');
+    emojiDiv.className = 'chore-emoji';
+    emojiDiv.textContent = chore.emoji;
+
+    const infoDiv = document.createElement('div');
+    infoDiv.className = 'chore-info';
+
+    const nameDiv = document.createElement('div');
+    nameDiv.className = 'chore-name';
+    nameDiv.textContent = chore.name;
+    infoDiv.appendChild(nameDiv);
+
+    if (chore.doneBy.length) {
+      const doneByDiv = document.createElement('div');
+      doneByDiv.className = doneBoth ? 'chore-done-by' : `chore-done-by ${chore.doneBy[0].toLowerCase()}`;
+      doneByDiv.textContent = `✓ Done by ${chore.doneBy.join(' & ')}`;
+      infoDiv.appendChild(doneByDiv);
+    }
+
+    const selectedDone = chore.doneBy.includes(selectedKid);
+    const checkDiv = document.createElement('div');
+    checkDiv.className = 'chore-check' + (selectedDone ? ` checked-${selectedKid.toLowerCase()}` : '');
+    checkDiv.textContent = selectedDone ? '✓' : '';
+
+    div.appendChild(emojiDiv);
+    div.appendChild(infoDiv);
+    div.appendChild(checkDiv);
     list.appendChild(div);
   });
 }
 
 function renderScores() {
-  const cs = chores.filter(c => c.doneBy === 'Charlie').length;
-  const bs = chores.filter(c => c.doneBy === 'Bertie').length;
-  document.getElementById('charlieScore').textContent = cs;
-  document.getElementById('bertieScore').textContent = bs;
+  const scores = getWeeklyScores();
+  document.getElementById('charlieScore').textContent = scores.Charlie || 0;
+  document.getElementById('bertieScore').textContent = scores.Bertie || 0;
 }
 
 function renderSummary() {
-  const charlieChores = chores.filter(c => c.doneBy === 'Charlie');
-  const bertieChores  = chores.filter(c => c.doneBy === 'Bertie');
+  const charlieChores = chores.filter(c => c.doneBy.includes('Charlie'));
+  const bertieChores  = chores.filter(c => c.doneBy.includes('Bertie'));
 
   const cEl = document.getElementById('charlieSummary');
   const bEl = document.getElementById('bertieSummary');
 
-  cEl.innerHTML = charlieChores.length
-    ? charlieChores.map(c => `<span class="summary-chore-tag">${c.emoji} ${c.name}</span>`).join('')
-    : '<span class="no-chores">No chores done yet</span>';
+  cEl.innerHTML = '';
+  if (charlieChores.length) {
+    charlieChores.forEach(c => {
+      const tag = document.createElement('span');
+      tag.className = 'summary-chore-tag';
+      tag.textContent = `${c.emoji} ${c.name}`;
+      cEl.appendChild(tag);
+    });
+  } else {
+    const span = document.createElement('span');
+    span.className = 'no-chores';
+    span.textContent = 'No chores done yet';
+    cEl.appendChild(span);
+  }
 
-  bEl.innerHTML = bertieChores.length
-    ? bertieChores.map(c => `<span class="summary-chore-tag">${c.emoji} ${c.name}</span>`).join('')
-    : '<span class="no-chores">No chores done yet</span>';
+  bEl.innerHTML = '';
+  if (bertieChores.length) {
+    bertieChores.forEach(c => {
+      const tag = document.createElement('span');
+      tag.className = 'summary-chore-tag';
+      tag.textContent = `${c.emoji} ${c.name}`;
+      bEl.appendChild(tag);
+    });
+  } else {
+    const span = document.createElement('span');
+    span.className = 'no-chores';
+    span.textContent = 'No chores done yet';
+    bEl.appendChild(span);
+  }
 }
 
 function updateSectionLabel() {
@@ -609,25 +702,30 @@ function selectKid(name) {
   document.querySelectorAll('.kid-btn').forEach(b => b.classList.remove('active'));
   document.querySelector(`.kid-btn.${name.toLowerCase()}`).classList.add('active');
   updateSectionLabel();
+  renderChores(); // re-render so check circles reflect the newly selected kid
 }
 
-async function toggleChore(id) {
+async function toggleChore(id, event) {
+  if (syncingChores.has(id)) return;
   const chore = chores.find(c => c.id === id);
   if (!chore) return;
 
-  if (chore.doneBy === selectedKid) {
-    // Undo
-    chore.doneBy = null;
-  } else if (chore.doneBy && chore.doneBy !== selectedKid) {
-    showBanner(`⚠️ Already done by ${chore.doneBy}! Tap their name first to undo.`, 'error');
-    return;
+  const alreadyDone = chore.doneBy.includes(selectedKid);
+  const scores = getWeeklyScores();
+  if (alreadyDone) {
+    chore.doneBy = chore.doneBy.filter(k => k !== selectedKid);
+    scores[selectedKid] = Math.max(0, (scores[selectedKid] || 0) - 1);
   } else {
-    chore.doneBy = selectedKid;
+    chore.doneBy = [...chore.doneBy, selectedKid];
+    scores[selectedKid] = (scores[selectedKid] || 0) + 1;
     burst(event);
   }
+  saveWeeklyScores(scores);
 
   renderAll();
+  syncingChores.add(id);
   await saveChore(chore);
+  syncingChores.delete(id);
 }
 
 async function saveChore(chore) {
@@ -636,9 +734,10 @@ async function saveChore(chore) {
     const params = new URLSearchParams({
       action: 'updateChore',
       id: chore.id,
-      doneBy: chore.doneBy || ''
+      doneBy: chore.doneBy.join(',')
     });
     const res = await fetch(`${SCRIPT_URL}?${params}`);
+    if (!res.ok) throw new Error(`HTTP ${res.status}`);
     const data = await res.json();
     if (data.error) showBanner('⚠️ Sheet error: ' + data.error, 'error');
   } catch(e) {
@@ -648,8 +747,8 @@ async function saveChore(chore) {
 
 function switchView(view) {
   currentView = view;
-  document.querySelectorAll('.view-tab').forEach((t, i) => {
-    t.classList.toggle('active', (i === 0 && view === 'chores') || (i === 1 && view === 'summary'));
+  document.querySelectorAll('.view-tab').forEach(t => {
+    t.classList.toggle('active', t.dataset.view === view);
   });
   document.querySelectorAll('.chores-view').forEach(el => el.classList.toggle('hide', view !== 'chores'));
   const sv = document.getElementById('summaryView');
@@ -663,7 +762,12 @@ function toggleConfig() {
 }
 
 function saveConfig() {
-  SCRIPT_URL = document.getElementById('scriptUrlInput').value.trim();
+  const url = document.getElementById('scriptUrlInput').value.trim();
+  if (url && !url.startsWith('https://script.google.com/')) {
+    showBanner('⚠️ URL must start with https://script.google.com/', 'error');
+    return;
+  }
+  SCRIPT_URL = url;
   localStorage.setItem(STORAGE_KEY, SCRIPT_URL);
   document.getElementById('configPanel').classList.remove('show');
   showBanner('✅ URL saved! Reloading chores...', 'success');
@@ -672,13 +776,17 @@ function saveConfig() {
 
 async function resetDay() {
   if (!confirm('Reset all chores for today? This will clear everyone\'s progress.')) return;
-  chores.forEach(c => c.doneBy = null);
+  chores.forEach(c => c.doneBy = []);
   renderAll();
   document.getElementById('configPanel').classList.remove('show');
   if (SCRIPT_URL) {
     try {
-      await fetch(`${SCRIPT_URL}?action=resetDay`);
-    } catch(e) {}
+      const res = await fetch(`${SCRIPT_URL}?action=resetDay`);
+      if (!res.ok) throw new Error(`HTTP ${res.status}`);
+    } catch(e) {
+      showBanner('⚠️ Local chores cleared but sheet reset failed: ' + e.message, 'error');
+      return;
+    }
   }
   showBanner('🔄 Chores reset!', 'success');
 }
@@ -690,9 +798,10 @@ async function testConnection() {
   document.getElementById('configPanel').classList.remove('show');
   try {
     const res = await fetch(`${SCRIPT_URL}?action=getChores`);
+    if (!res.ok) throw new Error(`HTTP ${res.status}`);
     const data = await res.json();
     if (data.chores) {
-      showBanner(`✅ Connected! Found ${data.chores.length} chores for ${data.date}`, 'success');
+      showBanner(`✅ Connected! Found ${data.chores.length} chores${data.date ? ` for ${data.date}` : ''}`, 'success');
     } else {
       showBanner('⚠️ Unexpected response: ' + JSON.stringify(data).slice(0,80), 'error');
     }
@@ -702,7 +811,7 @@ async function testConnection() {
 }
 
 function showLoading(on) {
-  document.getElementById('loadingOverlay').style.display = on ? 'flex' : 'none';
+  document.getElementById('loadingOverlay').classList.toggle('show', on);
 }
 
 let bannerTimer;
@@ -725,20 +834,17 @@ function burst(e) {
       width:10px; height:10px; border-radius:50%;
       background:${colors[i % colors.length]};
       left:${x}px; top:${y}px;
-      animation: fly${i} 0.7s ease-out forwards;
     `;
     const angle = (i / 12) * 360;
     const dist = 60 + Math.random() * 60;
     const dx = Math.cos(angle * Math.PI/180) * dist;
     const dy = Math.sin(angle * Math.PI/180) * dist;
-    const style = document.createElement('style');
-    style.textContent = `@keyframes fly${i} {
-      0%   { transform: translate(0,0) scale(1); opacity:1; }
-      100% { transform: translate(${dx}px,${dy}px) scale(0); opacity:0; }
-    }`;
-    document.head.appendChild(style);
     document.body.appendChild(dot);
-    setTimeout(() => { dot.remove(); style.remove(); }, 700);
+    dot.animate([
+      { transform: 'translate(0,0) scale(1)', opacity: 1 },
+      { transform: `translate(${dx}px,${dy}px) scale(0)`, opacity: 0 }
+    ], { duration: 700, easing: 'ease-out', fill: 'forwards' });
+    setTimeout(() => dot.remove(), 700);
   }
 }
 </script>
