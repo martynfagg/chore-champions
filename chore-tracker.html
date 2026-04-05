@@ -331,6 +331,7 @@
     cursor: pointer;
     box-shadow: 0 4px 20px rgba(0,0,0,0.3);
     z-index: 100;
+    display: none;
   }
 
   .config-panel {
@@ -434,7 +435,7 @@
 </div>
 
 <header>
-  <h1>🏆 Chore Champions</h1>
+  <h1 id="appTitle">🏆 Chore Champions</h1>
   <p class="subtitle">Who's going to win today?</p>
 </header>
 
@@ -500,7 +501,8 @@
 <script>
 // ─── CONFIG ───────────────────────────────────────────────────────────────────
 const STORAGE_KEY = 'choreChampions_scriptUrl';
-let SCRIPT_URL = localStorage.getItem(STORAGE_KEY) || '';
+const BAKED_URL = 'https://script.google.com/macros/s/AKfycbwiRf4bKVGc5tH932yOEPJxlNyWUpdb8y1skpDTUQVeBXq3O7YQWNHVK_ac8BTbyRU/exec'; // ← parent: paste your Google Apps Script URL here before sharing
+let SCRIPT_URL = localStorage.getItem(STORAGE_KEY) || BAKED_URL;
 
 // Default chores (emoji + name)
 const DEFAULT_CHORES = [
@@ -559,16 +561,31 @@ window.addEventListener('DOMContentLoaded', () => {
       panel.classList.remove('show');
     }
   });
+
+  // Secret: tap the title 5 times to reveal the settings gear
+  let titleTaps = 0, titleTimer;
+  document.getElementById('appTitle').addEventListener('click', () => {
+    titleTaps++;
+    clearTimeout(titleTimer);
+    titleTimer = setTimeout(() => { titleTaps = 0; }, 1500);
+    if (titleTaps >= 5) {
+      titleTaps = 0;
+      document.getElementById('configBtn').style.display = 'flex';
+      showBanner('⚙️ Settings unlocked', 'info');
+    }
+  });
 });
 
 async function loadChores() {
   showLoading(true);
   if (!SCRIPT_URL) {
-    // No URL set - use defaults with no completion data
     chores = DEFAULT_CHORES.map(c => ({ ...c, doneBy: [] }));
     showLoading(false);
     renderAll();
-    showBanner('⚙️ Set your Google Apps Script URL in settings to save progress!', 'info');
+    // Only show setup hint if neither a baked URL nor a saved URL is present
+    if (!BAKED_URL) {
+      showBanner('⚙️ Set your Google Apps Script URL in settings to save progress!', 'info');
+    }
     return;
   }
   try {
